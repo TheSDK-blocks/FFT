@@ -1,0 +1,3 @@
+[submodule "chisel"]
+	path = chisel
+	url = git@bwrcrepo.eecs.berkeley.edu:dsp-blocks/chisel/FFT.git
