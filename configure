@@ -1,0 +1,34 @@
+#!/bin/sh
+THISDIR=$( cd `dirname $0` && pwd )
+
+#Defines TheSDK environment variables
+. ${THISDIR}/../../TheSDK.config
+
+echo "Configuring FFT chisel generator"
+cd $THISDIR/chisel && ./configure && cd ..
+
+CURRENTFILE=${THISDIR}/Makefile
+echo "Generating Makefile"
+
+cat << EOF > ${THISDIR}/Makefile
+
+.PHONY: all sim chisel clean
+
+all: chisel sim
+
+sim: chisel
+	cd ${THISDIR}/FFT && \\
+	${PYL} __init__.py
+
+chisel:
+	cd $THISDIR/chisel && \\
+	make n=64 lanes=64
+
+clean:
+	cd ${THISDIR}/chisel && \\
+	make clean &&
+	find ${THISDIR}/Simulations -name \*tmp\*.txt -exec rm {} \\; 
+   
+EOF
+exit 0
+
