@@ -6,7 +6,6 @@ import os
 import sys
 
 import numpy as np
-import tempfile
 
 from thesdk import *
 from verilog import *
@@ -27,6 +26,8 @@ class FFT(verilog,thesdk):
         self.par= False;             # By default, no parallel processing
         self.queue= [];              # By default, no parallel processing
         self._io_out = IO();         # Pointer for output data
+        self.control_in = IO();      # IO, with property Data
+        self.control_in.Data = Bundle() # Bundle of verilog_iofiles, inited empty
         if len(arg)>=1:
             parent=arg[0]
             self.copy_propval(parent,self.proplist)
@@ -38,7 +39,6 @@ class FFT(verilog,thesdk):
         #Adds files to bundle
         _=verilog_iofile(self,name='io_out',datatype='complex')
         _=verilog_iofile(self,name='io_in',dir='in')
-        #self.vlogmodulefiles =list(['clkdiv_n_2_4_8.v', 'AsyncResetReg.v'])
         self.vlogparameters=dict([ ('g_Rs',self.Rs), 
             ])
 
@@ -55,12 +55,38 @@ class FFT(verilog,thesdk):
         if self.model=='py':
             self.main()
         else: 
-          self.write_infile()
           if self.model=='sv':
+              if not 'control_file' in self.control_in.Data.Members:
+                  self.create_controlfile()
+                  self.reset()
+              else:
+                  self.control_in.Data.Members['control_file'].adopt(parent=self)
+
+              # Create testbench and execute the simulation
+              self.define_testbench()
+              self.tb.export(force=True)
+              self.write_infile()
               self.run_verilog()
+              self.read_outfile()
+              del self.iofile_bundle
+
           elif self.model=='vhdl':
-              self.run_vhdl()
-          self.read_outfile()
+              self.print_log(type='F', msg='VHDL model not yet supported')
+
+    def create_controlfile(self):
+        self.control_in.Data.Members['control_file']=verilog_iofile(self,
+            name='control_file',
+            dir='in',
+            iotype='ctrl'
+        )
+        # Create Connectors of the signals controlled by this file
+        # Connctor list simpler to create with intermediate variable
+        c=verilog_connector_bundle()
+        c.new(name='reset', cls='reg')
+        c.new(name='initdone', cls='reg')
+        self.control_in.Data.Members['control_file']\
+                .verilog_connectors=c.list(names=[ 'initdone', 'reset'])
+        print(self.control_in.Data.Members['control_file'].verilog_connectors[1].name)
 
     def write_infile(self):
         #Input file data definitions
@@ -84,27 +110,34 @@ class FFT(verilog,thesdk):
     def distribute_result(self):
         if self.par:
             self.queue.put(self._io_out)
+
+    def reset(self):
+        #start defining the file
+        f=self.control_in.Data.Members['control_file']
+        f.set_control_data(init=0) #Initialize to zero at time 0
+        time=0
+        for name in [ 'reset', ]:
+            f.set_control_data(time=time,name=name,val=1)
+
+        # After awhile, switch off reset 
+        time=int(16/(self.Rs*1e-12))
+
+        for name in [ 'reset', ]:
+            f.set_control_data(time=time,name=name,val=0)
+        for name in [ 'initdone', ]:
+            f.set_control_data(time=time,name=name,val=1)
      
     #Define method that generates reset sequence verilog
     def reset_sequence(self):
-    #    reset_sequence='begin\n'+self.iofile_bundle.Members['scan_inputs'].verilog_io+"""
-#end"""
-        reset_sequence="""
-        begin
-            done=0;
-            reset=1;
-            #(16*c_Ts)
-            reset=0;
-            io_in_valid=1;
-            initdone=1;
-        end
-        """
+        reset_sequence='begin\n'+self.iofile_bundle.Members['control_file'].verilog_io+"""
+end"""
         return reset_sequence
 
     # Testbench definition method
     def define_testbench(self):
         #Initialize testbench
         self.tb=vtb(self)
+
         # Dut is creted automaticaly, if verilog file for it exists
         self.tb.connectors.update(bundle=self.tb.dut_instance.io_signals.Members)
 
@@ -122,24 +155,14 @@ class FFT(verilog,thesdk):
         #Define testbench verilog file
         self.tb.file=self.vlogtbsrc
 
-
-        #for connector in self.scan.Data.Members['scan_inputs'].verilog_connectors:
-        #    self.tb.connectors.Members[connector.name]=connector
-        #    try: 
-        #        self.dut.ios.Members[connector.name].connect=connector
-        #    except:
-        #        pass
-
-        #    try: 
-        #        clkdivider.ios.Members[connector.name].connect=connector
-        #    except:
-        #        pass
-
-        # Some signals needed to control the sim
-        #self.tb.connectors.new(name='reset_loop', cls='reg')
-        #self.tb.connectors.new(name='asyncResetIn_clockRef', cls='reg') #Redundant?
-        #self.tb.connectors.new(name='lane_clkrst_asyncResetIn', cls='reg') #Redundant?
-        self.tb.connectors.connect(match=r"io_in_sync",connect='clock')
+        # Create TB connectors from the control file
+        for connector in self.control_in.Data.Members['control_file'].verilog_connectors:
+            self.tb.connectors.Members[connector.name]=connector
+            # Connect them to DUT
+            try: 
+                self.dut.ios.Members[connector.name].connect=connector
+            except:
+                pass
 
 
         ## Start initializations
@@ -148,13 +171,10 @@ class FFT(verilog,thesdk):
             if val.cls=='input':
                 val.connect.init='\'b0'
 
-        ## Some to ones
-        #oneslist=[
-        #    'asyncResetIn_clockRef',
-        #    'lane_clkrst_asyncResetIn',
-        #    'io_ctrl_and_clocks_reset_index_count', #%Is this obsoleted?
-        #    ]
-        #These are driven by serdeses, and serdes models are not there
+        self.tb.connectors.init(match=r"io_in_valid",init='\'b1')
+        # Connect one of the Dut inputs to clock and de-init it
+        self.tb.connectors.connect(match=r"io_in_sync",connect='clock')
+        self.tb.connectors.init(match=r"io_in_sync",init='')
 
         # IO file connector definitions
         # Define what signals and in which order and format are read form the files
@@ -175,28 +195,36 @@ class FFT(verilog,thesdk):
                      'io_in_bits_%s_imag' %(count)]
         self.iofile_bundle.Members[name].verilog_connectors=\
                 self.tb.connectors.list(names=ionames)
+
+        self.generate_tb_contents()
         
-        # This should be a method too
-        # Start the testbench contents
+    def generate_tb_contents(self):
+    # Start the testbench contents
         self.tb.contents="""
 //timescale 1ps this should probably be a global model parameter
 parameter integer c_Ts=1/(g_Rs*1e-12);
-reg initdone;
 reg done;
-"""+ self.tb.connector_definitions+self.tb.iofile_definitions+"""
-
+"""+\
+self.tb.connector_definitions+\
+self.tb.assignments(matchlist=[r"io_in_sync"])+\
+self.tb.iofile_definitions+\
+"""
 
 //DUT definition
-"""+self.tb.dut_instance.instance+"""
+"""+\
+self.tb.dut_instance.instance+\
+"""
 
 //Master clock is omnipresent
 always #(c_Ts/2.0) clock = !clock;
 
 //Execution with parallel fork-join and sequential begin-end sections
 initial #0 begin
-initdone=0;
-""" + self.tb.connectors.verilog_inits(level=1)+"""
-fork""" +self.reset_sequence()+""" 
+fork
+done=0;
+""" + \
+self.tb.connectors.verilog_inits(level=1)+\
+"""
 //io_out
 $display("Ready to write");
 @(posedge initdone) begin
@@ -204,27 +232,39 @@ $display("Ready to write");
 while (!done) begin
 @(posedge clock ) begin
     //Print only valid values
-    if ("""+self.iofile_bundle.Members['io_out'].verilog_io_condition + """
-    ) begin \n"""+ self.iofile_bundle.Members['io_out'].verilog_io+"""
+    if ("""+\
+            self.iofile_bundle.Members['io_out'].verilog_io_condition +\
+        """) begin
+        """+\
+            self.iofile_bundle.Members['io_out'].verilog_io+\
+        """
      end
 end
 end
 end
 
-        // Sequence triggered by initdone
-        $display("Ready to read");
-        @(posedge initdone ) begin
-        $display("Posedge initdone");
-            while (!$feof(f_io_in)) begin
-                 @(posedge clock )
-                 """+ self.iofile_bundle.Members['io_in'].verilog_io+"""
-            end
-            done<=1;
+    // Sequence triggered by initdone
+    $display("Ready to read");
+    @(posedge initdone ) begin
+    $display("Posedge initdone");
+        while (!$feof(f_io_in)) begin
+             @(posedge clock )
+             """+\
+             self.iofile_bundle.Members['io_in'].verilog_io+\
+             """
         end
+        done<=1;
+    end
+begin
+"""+\
+self.iofile_bundle.Members['control_file'].verilog_io+\
+"""
+end
     join
     """+self.tb.iofile_close+"""
     $finish;
 end"""
+
 
 if __name__=="__main__":
     import matplotlib.pyplot as plt
@@ -241,17 +281,19 @@ if __name__=="__main__":
             .reshape(-1,64)
     dut.io_in.Data=indata
     dut2.io_in.Data=indata
-    dut2.define_testbench()
-    dut2.tb.export(force=True)
     dut.run()
     dut2.run()
     plt.figure(0)
     plt.plot(np.abs(dut._io_out.Data[10,:]))
     plt.suptitle("Python model")
+    plt.xlabel("Freq")
+    plt.ylabel("Abs(FFT)")
     plt.show(block=False)
     plt.figure(1)
     plt.plot(np.abs(dut2._io_out.Data[10,:]))
     plt.suptitle("Verilog model")
+    plt.xlabel("Freq")
+    plt.ylabel("Abs(FFT)")
     plt.show(block=False)
     input()
 
