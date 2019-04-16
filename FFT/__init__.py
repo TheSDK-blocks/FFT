@@ -1,7 +1,5 @@
 # FFT class 
-# Last modification by Marko Kosunen, marko.kosunen@aalto.fi, 05.01.2018 11:07
-#Add TheSDK to path. Importing it first adds the rest of the modules
-#Simple buffer template
+# Written by Marko Kosunen, marko.kosunen@aalto.fi, 05.03.2019 11:07
 import os
 import sys
 
@@ -18,16 +16,16 @@ class FFT(verilog,thesdk):
         return os.path.dirname(os.path.realpath(__file__)) + "/"+__name__
 
     def __init__(self,*arg): 
-        self.proplist = [ 'Rs', 'FFT_N' ];    #properties that can be propagated from parent
-        self.Rs = 160e6;                 # Ssampling frequency
-        self.FFT_N  = 64;            # Npoint FFT
-        self.io_in = IO();           # Pointer for input data
-        self.model='py';             # Ccan be set externally, but is not propagated
-        self.par= False;             # By default, no parallel processing
-        self.queue= [];              # By default, no parallel processing
-        self._io_out = IO();         # Pointer for output data
-        self.control_in = IO();      # IO, with property Data
-        self.control_in.Data = Bundle() # Bundle of verilog_iofiles, inited empty
+        self.proplist = [ 'Rs', 'FFT_N' ]; #properties that can be propagated from parent
+        self.Rs = 160e6;                   # Sampling frequency
+        self.FFT_N  = 64;                  # Npoint FFT
+        self.io_in = IO();                 # Pointer for input data
+        self.model='py';                   # Can be set externally, but is not propagated
+        self.par= False;                   # By default, no parallel processing
+        self.queue= [];                    # By default, no parallel processing
+        self._io_out = IO();               # Pointer for output data
+        self.control_in = IO();            # IO, with property Data
+        self.control_in.Data = Bundle()    # Bundle of verilog_iofiles, inited empty
         if len(arg)>=1:
             parent=arg[0]
             self.copy_propval(parent,self.proplist)
@@ -39,8 +37,7 @@ class FFT(verilog,thesdk):
         #Adds files to bundle
         _=verilog_iofile(self,name='io_out',datatype='complex')
         _=verilog_iofile(self,name='io_in',dir='in')
-        self.vlogparameters=dict([ ('g_Rs',self.Rs), 
-            ])
+        self.vlogparameters=dict([ ('g_Rs',self.Rs),])
 
     def main(self):
         out=np.array(np.fft.fft(self.io_in.Data,self.FFT_N,1)) #FFT on colum, row is time
@@ -58,7 +55,7 @@ class FFT(verilog,thesdk):
           if self.model=='sv':
               if not 'control_file' in self.control_in.Data.Members:
                   self.create_controlfile()
-                  self.reset()
+                  self.reset_sequence()
               else:
                   self.control_in.Data.Members['control_file'].adopt(parent=self)
 
@@ -72,21 +69,6 @@ class FFT(verilog,thesdk):
 
           elif self.model=='vhdl':
               self.print_log(type='F', msg='VHDL model not yet supported')
-
-    def create_controlfile(self):
-        self.control_in.Data.Members['control_file']=verilog_iofile(self,
-            name='control_file',
-            dir='in',
-            iotype='ctrl'
-        )
-        # Create Connectors of the signals controlled by this file
-        # Connctor list simpler to create with intermediate variable
-        c=verilog_connector_bundle()
-        c.new(name='reset', cls='reg')
-        c.new(name='initdone', cls='reg')
-        self.control_in.Data.Members['control_file']\
-                .verilog_connectors=c.list(names=[ 'initdone', 'reset'])
-        print(self.control_in.Data.Members['control_file'].verilog_connectors[1].name)
 
     def write_infile(self):
         #Input file data definitions
@@ -106,12 +88,25 @@ class FFT(verilog,thesdk):
         self._io_out.Data=a.data
         print(self._io_out.Data)
         self.distribute_result()
-
-    def distribute_result(self):
         if self.par:
             self.queue.put(self._io_out)
 
-    def reset(self):
+    def create_controlfile(self):
+        self.control_in.Data.Members['control_file']=verilog_iofile(self,
+            name='control_file',
+            dir='in',
+            iotype='ctrl'
+        )
+        # Create connectors of the signals controlled by this file
+        # Connector list simpler to create with intermediate variable
+        c=verilog_connector_bundle()
+        c.new(name='reset', cls='reg')
+        c.new(name='initdone', cls='reg')
+        self.control_in.Data.Members['control_file']\
+                .verilog_connectors=c.list(names=[ 'initdone', 'reset'])
+        print(self.control_in.Data.Members['control_file'].verilog_connectors[1].name)
+
+    def reset_sequence(self):
         #start defining the file
         f=self.control_in.Data.Members['control_file']
         f.set_control_data(init=0) #Initialize to zero at time 0
@@ -126,12 +121,6 @@ class FFT(verilog,thesdk):
             f.set_control_data(time=time,name=name,val=0)
         for name in [ 'initdone', ]:
             f.set_control_data(time=time,name=name,val=1)
-     
-    #Define method that generates reset sequence verilog
-    def reset_sequence(self):
-        reset_sequence='begin\n'+self.iofile_bundle.Members['control_file'].verilog_io+"""
-end"""
-        return reset_sequence
 
     # Testbench definition method
     def define_testbench(self):
@@ -163,7 +152,6 @@ end"""
                 self.dut.ios.Members[connector.name].connect=connector
             except:
                 pass
-
 
         ## Start initializations
         #Init the signals connected to the dut input to zero
