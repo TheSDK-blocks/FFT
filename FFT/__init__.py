@@ -87,7 +87,6 @@ class FFT(verilog,thesdk):
         a.read(dtype='object')
         self._io_out.Data=a.data
         print(self._io_out.Data)
-        self.distribute_result()
         if self.par:
             self.queue.put(self._io_out)
 
@@ -271,18 +270,20 @@ if __name__=="__main__":
     dut2.io_in.Data=indata
     dut.run()
     dut2.run()
-    plt.figure(0)
+    f0=plt.figure(0)
     plt.plot(np.abs(dut._io_out.Data[10,:]))
     plt.suptitle("Python model")
     plt.xlabel("Freq")
     plt.ylabel("Abs(FFT)")
     plt.show(block=False)
-    plt.figure(1)
+    f0.savefig('fft_python.eps', format='eps', dpi=300);
+    f1=plt.figure(1)
     plt.plot(np.abs(dut2._io_out.Data[10,:]))
     plt.suptitle("Verilog model")
     plt.xlabel("Freq")
     plt.ylabel("Abs(FFT)")
     plt.show(block=False)
+    f1.savefig('fft_verilog.eps', format='eps', dpi=300);
     input()
 
 
