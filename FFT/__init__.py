@@ -24,8 +24,8 @@ class FFT(verilog,thesdk):
         self.par= False;                   # By default, no parallel processing
         self.queue= [];                    # By default, no parallel processing
         self._io_out = IO();               # Pointer for output data
-        self.control_in = IO();            # IO, with property Data
-        self.control_in.Data = Bundle()    # Bundle of verilog_iofiles, inited empty
+        self.control_write = IO();         # IO, with property Data
+        self.control_write.Data = Bundle() # Bundle of verilog_iofiles, inited empty
         if len(arg)>=1:
             parent=arg[0]
             self.copy_propval(parent,self.proplist)
@@ -53,11 +53,11 @@ class FFT(verilog,thesdk):
             self.main()
         else: 
           if self.model=='sv':
-              if not 'control_file' in self.control_in.Data.Members:
+              if not 'control_file' in self.control_write.Data.Members:
                   self.create_controlfile()
                   self.reset_sequence()
               else:
-                  self.control_in.Data.Members['control_file'].adopt(parent=self)
+                  self.control_write.Data.Members['control_file'].adopt(parent=self)
 
               # Create testbench and execute the simulation
               self.define_testbench()
@@ -90,37 +90,6 @@ class FFT(verilog,thesdk):
         if self.par:
             self.queue.put(self._io_out)
 
-    def create_controlfile(self):
-        self.control_in.Data.Members['control_file']=verilog_iofile(self,
-            name='control_file',
-            dir='in',
-            iotype='ctrl'
-        )
-        # Create connectors of the signals controlled by this file
-        # Connector list simpler to create with intermediate variable
-        c=verilog_connector_bundle()
-        c.new(name='reset', cls='reg')
-        c.new(name='initdone', cls='reg')
-        self.control_in.Data.Members['control_file']\
-                .verilog_connectors=c.list(names=[ 'initdone', 'reset'])
-        print(self.control_in.Data.Members['control_file'].verilog_connectors[1].name)
-
-    def reset_sequence(self):
-        #start defining the file
-        f=self.control_in.Data.Members['control_file']
-        f.set_control_data(init=0) #Initialize to zero at time 0
-        time=0
-        for name in [ 'reset', ]:
-            f.set_control_data(time=time,name=name,val=1)
-
-        # After awhile, switch off reset 
-        time=int(16/(self.Rs*1e-12))
-
-        for name in [ 'reset', ]:
-            f.set_control_data(time=time,name=name,val=0)
-        for name in [ 'initdone', ]:
-            f.set_control_data(time=time,name=name,val=1)
-
     # Testbench definition method
     def define_testbench(self):
         #Initialize testbench
@@ -144,7 +113,7 @@ class FFT(verilog,thesdk):
         self.tb.file=self.vlogtbsrc
 
         # Create TB connectors from the control file
-        for connector in self.control_in.Data.Members['control_file'].verilog_connectors:
+        for connector in self.control_write.Data.Members['control_file'].verilog_connectors:
             self.tb.connectors.Members[connector.name]=connector
             # Connect them to DUT
             try: 
@@ -172,8 +141,9 @@ class FFT(verilog,thesdk):
             ionames+=[ 'io_out_bits_%s_real' %(count), 'io_out_bits_%s_imag' %(count)]
         self.iofile_bundle.Members[name].verilog_connectors=\
                 self.tb.connectors.list(names=ionames)
-        for name in ionames:
-            self.tb.connectors.Members[name].type='signed'
+        for ioname in ionames:
+            self.tb.connectors.Members[ioname].type='signed'
+        self.iofile_bundle.Members[name].verilog_io_condition_append(cond='&& initdone')
 
         name='io_in'
         ionames=[]
@@ -182,80 +152,14 @@ class FFT(verilog,thesdk):
                      'io_in_bits_%s_imag' %(count)]
         self.iofile_bundle.Members[name].verilog_connectors=\
                 self.tb.connectors.list(names=ionames)
+        self.iofile_bundle.Members[name].verilog_io_condition='initdone'
 
-        self.generate_tb_contents()
-        
-    def generate_tb_contents(self):
-    # Start the testbench contents
-        self.tb.contents="""
-//timescale 1ps this should probably be a global model parameter
-parameter integer c_Ts=1/(g_Rs*1e-12);
-reg done;
-"""+\
-self.tb.connector_definitions+\
-self.tb.assignments(matchlist=[r"io_in_sync"])+\
-self.tb.iofile_definitions+\
-"""
-
-//DUT definition
-"""+\
-self.tb.dut_instance.instance+\
-"""
-
-//Master clock is omnipresent
-always #(c_Ts/2.0) clock = !clock;
-
-//Execution with parallel fork-join and sequential begin-end sections
-initial #0 begin
-fork
-done=0;
-""" + \
-self.tb.connectors.verilog_inits(level=1)+\
-"""
-//io_out
-$display("Ready to write");
-@(posedge initdone) begin
-    $display("Posedge initdone");
-while (!done) begin
-@(posedge clock ) begin
-    //Print only valid values
-    if ("""+\
-            self.iofile_bundle.Members['io_out'].verilog_io_condition +\
-        """) begin
-        """+\
-            self.iofile_bundle.Members['io_out'].verilog_io+\
-        """
-     end
-end
-end
-end
-
-    // Sequence triggered by initdone
-    $display("Ready to read");
-    @(posedge initdone ) begin
-    $display("Posedge initdone");
-        while (!$feof(f_io_in)) begin
-             @(posedge clock )
-             """+\
-             self.iofile_bundle.Members['io_in'].verilog_io+\
-             """
-        end
-        done<=1;
-    end
-begin
-"""+\
-self.iofile_bundle.Members['control_file'].verilog_io+\
-"""
-end
-    join
-    """+self.tb.iofile_close+"""
-    $finish;
-end"""
-
+        self.tb.generate_contents()
 
 if __name__=="__main__":
     import matplotlib.pyplot as plt
     from  FFT import *
+    from  FFT.controller import controller as FFT_controller
     dut=FFT()
     dut2=FFT()
     dut.model='py'
@@ -266,8 +170,12 @@ if __name__=="__main__":
     fsig=25e6
     indata=2**10*np.exp(1j*2*np.pi/phres*(np.arange(len)*np.round(fsig/dut.Rs*phres)))\
             .reshape(-1,64)
+    controller=FFT_controller()
+    controller.reset()
     dut.io_in.Data=indata
     dut2.io_in.Data=indata
+    dut.control_write=controller.control_write
+    dut2.control_write=controller.control_write
     dut.run()
     dut2.run()
     f0=plt.figure(0)
